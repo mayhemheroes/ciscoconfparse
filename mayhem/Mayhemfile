@@ -1,0 +1,9 @@
+project: ciscoconfparse
+target: fuzz-parse
+testsuite:
+    - file://mayhem/testsuite
+
+cmds:
+  - cmd: /src/mayhem/fuzz_parse.py
+    libfuzzer: true
+    timeout: 12
