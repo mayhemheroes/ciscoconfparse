@@ -3,6 +3,8 @@
 import atheris
 import io
 import sys
+import logging
+import warnings
 from contextlib import contextmanager
 
 import fuzz_helpers
@@ -11,7 +13,8 @@ import fuzz_helpers
 with atheris.instrument_imports(include=['ciscoconfparse']):
     from ciscoconfparse import CiscoConfParse
 
-
+logging.disable(logging.CRITICAL)
+warnings.filterwarnings("ignore")
 @contextmanager
 def nostdout():
     save_stdout = sys.stdout
@@ -40,7 +43,7 @@ def TestOneInput(data):
     try:
         with nostdout():
             CiscoConfParse(config_stmts, factory=factory, syntax=syntax, comment=delimiter)
-    except (AssertionError, NotImplementedError):
+    except (AssertionError, NotImplementedError, IndexError):
         return -1
     except ValueError as e:
         if 'Could not find' in str(e):
