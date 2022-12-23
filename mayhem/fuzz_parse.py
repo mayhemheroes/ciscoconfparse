@@ -14,7 +14,9 @@ with atheris.instrument_imports(include=['ciscoconfparse']):
     from ciscoconfparse import CiscoConfParse
 
 logging.disable(logging.CRITICAL)
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore"
+
+                        )
 @contextmanager
 def nostdout():
     save_stdout = sys.stdout
@@ -43,7 +45,7 @@ def TestOneInput(data):
     try:
         with nostdout():
             CiscoConfParse(config_stmts, factory=factory, syntax=syntax, comment=delimiter)
-    except (AssertionError, NotImplementedError, IndexError):
+    except (AssertionError, NotImplementedError):
         return -1
     except ValueError as e:
         if 'Could not find' in str(e):
