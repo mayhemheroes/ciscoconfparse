@@ -5,7 +5,6 @@ import io
 import sys
 import logging
 import warnings
-import random
 from contextlib import contextmanager
 
 import fuzz_helpers
@@ -51,12 +50,6 @@ def TestOneInput(data):
         if 'Could not find' in str(e):
             return -1
         raise
-    except IndexError as e:
-        # Raised too often, throw sometimes
-        if random.random() > 0.99:
-            raise
-        else:
-            return -1
 
 
 def main():
