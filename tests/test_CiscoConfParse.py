@@ -1,6 +1,6 @@
 r""" test_CiscoConfParse.py - Parse, Query, Build, and Modify IOS-style configs
 
-     Copyright (C) 2021-2022 David Michael Pennington
+     Copyright (C) 2021-2023 David Michael Pennington
      Copyright (C) 2019-2021 David Michael Pennington at Cisco Systems / ThousandEyes
      Copyright (C) 2012-2019 David Michael Pennington at Samsung Data Services
      Copyright (C) 2011-2012 David Michael Pennington at Dell Computer Corporation
@@ -50,7 +50,43 @@ from ciscoconfparse.ccp_util import IPv4Obj, IPv6Obj
 from ciscoconfparse.ccp_abc import BaseCfgLine
 
 
-def testParse_invalid_filepath():
+def testParse_valid_filepath_01():
+    """Test reading a cisco ios config-file on disk (without the config keyword); ref github issue #262."""
+    parse = CiscoConfParse("../configs/sample_01.ios")
+    assert len(parse.ioscfg) == 450
+
+
+def testParse_valid_filepath_02():
+    """Test reading a cisco ios config-file on disk (from filename in the config parameter); ref github issue #262."""
+    parse = CiscoConfParse(config="../configs/sample_01.ios")
+    assert len(parse.ioscfg) == 450
+
+
+def testParse_valid_filepath_03():
+    """Test reading an f5 config-file on disk (without the config keyword); ref github issue #262."""
+    parse = CiscoConfParse("../configs/sample_01.f5", comment="#", syntax="junos")
+    assert len(parse.ioscfg) == 16
+
+
+def testParse_valid_filepath_04():
+    """Test reading an f5 config-file on disk (from filename in the config parameter); ref github issue #262."""
+    parse = CiscoConfParse(config="../configs/sample_01.f5", comment="#", syntax="junos")
+    assert len(parse.ioscfg) == 16
+
+
+def testParse_valid_filepath_05():
+    """Test reading a junos config-file on disk (without the config keyword); ref github issue #262."""
+    parse = CiscoConfParse("../configs/sample_01.junos", comment="#", syntax="junos")
+    assert len(parse.ioscfg) == 79
+
+
+def testParse_valid_filepath_06():
+    """Test reading a junos config-file on disk (from filename in the config parameter); ref github issue #262."""
+    parse = CiscoConfParse(config="../configs/sample_01.junos", comment="#", syntax="junos")
+    assert len(parse.ioscfg) == 79
+
+
+def testParse_invalid_filepath_01():
     """Test that ciscoconfparse raises an error if the filepath is invalid"""
     # REMOVED caplog arg
 
@@ -58,20 +94,25 @@ def testParse_invalid_filepath():
     bad_filename = "./45faa63b-92e0-4449-a247-f20510d50c1b.txt"
     assert os.path.isfile(bad_filename) is False
 
-    #ccp_logger_control(action="disable")  # Silence logs about the missing file error
+    # ccp_logger_control(action="disable")  # Silence logs about the missing file error
 
     # Test that CiscoConfParse raises an IOError() when parsing an invalid file...
-    #with pytest.raises(OSError):
     with pytest.raises(OSError, match=""):
         # Normally logs to stdout... using logging.CRITICAL to hide errors...
-        raise OSError
-        parse = CiscoConfParse(bad_filename)
+        CiscoConfParse(bad_filename)
+        raise OSError   # FIXME
 
-    #ccp_logger_control(action="enable")
+def testParse_invalid_filepath_02():
+    # FIXME
+    bad_filename = "this is not a filename or list"
+    assert os.path.isfile(bad_filename) is False
 
-def testParse_invalid_config():
-    with pytest.raises(ValueError, match=""):
-        CiscoConfParse("this is not a filename or list")
+    with pytest.raises(OSError, match=""):
+        CiscoConfParse(bad_filename)
+
+def testParse_invalid_config_01():
+    """test that we do not raise an error when parsing an empty config list"""
+    CiscoConfParse([])
 
 def testParse_f5_as_ios_00(parse_f01_ios):
     assert len(parse_f01_ios.objs)==20
@@ -907,6 +948,10 @@ def testValues_find_blocks(parse_c01):
     test_result = parse_c01.find_blocks("tresspasser")
     assert result_correct == test_result
 
+
+def testValues_list_before_01():
+    """Ensure that CiscoConfParse() raises an error on parsing empty config lists."""
+
 def testValues_list_insert_before_01():
     """test whether we can insert list elements"""
     c01 = [
@@ -1567,10 +1612,8 @@ def testValues_replace_children_01(parse_c01):
         assert result_correct == test_result
 
 
-@pytest.mark.xfail(
-    sys.version_info[0] == 3, reason="difflib.SequenceMatcher is broken in Python3"
-)
-def testValues_sync_diff_01(parse_c01):
+def testValues_ios_sync_diff_01(parse_c01):
+    """Test whether sync_diff() returns the correct diff when modifying logging in parse_c01."""
     ## test sync_diff as a drop-in replacement for req_cfgspec_excl_diff()
     ##   This test mirrors testValues_req_cfgspec_excl_diff()
     result_correct = [
@@ -1589,7 +1632,7 @@ def testValues_sync_diff_01(parse_c01):
 @pytest.mark.xfail(
     sys.version_info[0] == 3, reason="difflib.SequenceMatcher is broken in Python3"
 )
-def testValues_sync_diff_03():
+def testValues_ios_sync_diff_03():
     ## config_01 is the starting point
     config_01 = [
         "!",

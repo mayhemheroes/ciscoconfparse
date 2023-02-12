@@ -64,8 +64,25 @@ for intf_obj in parse.find_objects('^interface'):
     print("{0}: {1}".format(intf_name, intf_ip_addr))
 ```
 
-What if we don\'t use Cisco?
-----------------------------
+Are there private copies of CiscoConfParse()?
+---------------------------------------------
+
+Yes.  [Cisco Systems][27] maintains their own copy of `CiscoConfParse()`. The terms of the GPLv3
+license allow this as long as they don't distribute their modified private copy in
+binary form.  Also refer to this [GPLv3 License primer / GPLv3 101][45].  Officially, [modified
+copies of CiscoConfParse source-code must also be licensed as GPLv3][45].
+
+Dear [Cisco Systems][27]: please consider porting your improvements back into
+the [`github ciscoconfparse repo`](https://github.com/mpenning/ciscoconfparse).
+
+Is this a tool, or is it artwork?
+---------------------------------
+
+That depends on who you ask.  Many companies use CiscoConfParse as part of their
+network engineering toolbox; others regard it as a form of artwork.
+
+What if we don\'t use Cisco IOS?
+--------------------------------
 
 Don\'t let that stop you.
 
@@ -156,7 +173,7 @@ Bug Tracker and Support
 Unit-Tests
 ----------
 
-The project\'s [test workflow][1] checks ciscoconfparse on Python versions 3.6 and higher, as well as a [pypy JIT][22] executable.
+The project\'s [test workflow][1] checks ciscoconfparse on Python versions 3.7 and higher, as well as a [pypy JIT][22] executable.
 
 Click the image below for details; the current build status is: [![Github unittest status][4]][5]
 
@@ -175,7 +192,7 @@ License and Copyright
 
 [ciscoconfparse][3] is licensed [GPLv3][21]
 
-- Copyright (C) 2021-2022 David Michael Pennington
+- Copyright (C) 2021-2023 David Michael Pennington
 - Copyright (C) 2020-2021 David Michael Pennington at Cisco Systems (post-acquisition: Cisco acquired ThousandEyes)
 - Copyright (C) 2019 David Michael Pennington at ThousandEyes
 - Copyright (C) 2012-2019 David Michael Pennington at Samsung Data Services
@@ -190,7 +207,7 @@ Author
 [ciscoconfparse][3] was written by [David Michael Pennington][25] (mike \[\~at\~\] pennington \[.dot.\] net).
 
 
-  [1]: https://github.com/mpenning/ciscoconfparse/tree/master/.github/workflows
+  [1]: https://github.com/mpenning/ciscoconfparse/blob/main/.github/workflows/tests.yml
   [2]: https://img.shields.io/pypi/v/ciscoconfparse.svg
   [3]: https://pypi.python.org/pypi/ciscoconfparse/
   [4]: https://github.com/mpenning/ciscoconfparse/actions/workflows/tests.yml/badge.svg
@@ -234,3 +251,4 @@ Author
   [42]: https://img.shields.io/github/commit-activity/m/mpenning/ciscoconfparse
   [43]: https://www.codefactor.io/Content/badges/B.svg
   [44]: https://www.codefactor.io/repository/github/mpenning/ciscoconfparse/
+  [45]: https://fossa.com/blog/open-source-software-licenses-101-gpl-v3/

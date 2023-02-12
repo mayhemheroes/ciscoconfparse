@@ -1,7 +1,7 @@
 """
 ciscoconfparse.py - Parse, Query, Build, and Modify IOS-style configs.
 
-Copyright (C) 2022 David Michael Pennington
+Copyright (C) 2022-2023 David Michael Pennington
 Copyright (C) 2022 David Michael Pennington at WellSky
 Copyright (C) 2019-2021 David Michael Pennington at Cisco Systems / ThousandEyes
 Copyright (C) 2012-2019 David Michael Pennington at Samsung Data Services
@@ -25,12 +25,11 @@ If you need to contact the author, you can do so by emailing:
 mike [~at~] pennington [.dot.] net
 """
 
-from collections.abc import MutableSequence, Iterator
+from collections.abc import MutableSequence, Sequence
 from datetime import datetime
 from functools import partial
 from operator import is_not
 import warnings
-import difflib
 import inspect
 import pathlib
 import locale
@@ -39,6 +38,7 @@ import copy
 import sys
 import re
 import os
+
 
 from ciscoconfparse.models_cisco import IOSHostnameLine, IOSRouteLine
 from ciscoconfparse.models_cisco import IOSIntfLine
@@ -116,6 +116,12 @@ def get_version_number():
     return version
 
 
+def enforce_valid_types(var, var_types=None, error_str=None):
+    assert isinstance(var_types, tuple)
+    if not isinstance(var, var_types):
+        raise ValueError(error_str)
+
+
 @logger.catch(reraise=True)
 def initialize_globals():
     """Initialize ciscoconfparse global dunder variables and a couple others."""
@@ -182,10 +188,13 @@ initialize_ciscoconfparse()
 def _parse_line_braces(line_txt=None, comment_delimiter=None) -> tuple:
     """Internal helper-method for brace-delimited configs (typically JunOS)."""
     # Removed config parameter assertions in 1.7.2...
-    if not isinstance(line_txt, str):
-        raise ValueError("line_txt parameter must be a string.")
-    if not isinstance(comment_delimiter, str):
-        raise ValueError("comment_delimiter parameter must be a string.")
+
+    enforce_valid_types(line_txt, (str,),
+        "line_txt parameter must be a string."
+    )
+    enforce_valid_types(comment_delimiter, (str,),
+        "comment_delimiter parameter must be a string."
+    )
     if len(comment_delimiter) > 1:
         raise ValueError("len(comment_delimiter) must be one.")
 
@@ -208,7 +217,7 @@ def _parse_line_braces(line_txt=None, comment_delimiter=None) -> tuple:
 
     if nn is not None:
         results = nn.groupdict()
-        return (this_line_indent, child_indent, results.get('delimiter') + results.get('comment', ''))
+        return (this_line_indent, child_indent, results.get('delimiter', '') + results.get('comment', ''))
 
     elif mm is not None:
         results = mm.groupdict()
@@ -278,18 +287,57 @@ def _parse_line_braces(line_txt=None, comment_delimiter=None) -> tuple:
             line = results.get('line1', None) or ''
             return (this_line_indent, child_indent, line)
 
-        elif (line2_str != '') and (line3_str is not None):
+        elif (line2_str != '') and (line2_str is not None):
             this_line_indent += 0
             child_indent += 0
             return (this_line_indent, child_indent, '')
 
         else:
             raise ValueError('Cannot parse {} match:"{}"'.format(
-                    syntax, line_txt))
+                syntax, line_txt))
 
     else:
         raise ValueError('Cannot parse {}:"{}"'.format(syntax, line_txt))
 
+# This method was on ConfigList()
+@logger.catch(reraise=True)
+def _build_cfgobj_from_text(txt, idx, syntax=None, comment_delimiter=None, factory=None):
+    """Build cfgobj from configuration text syntax, and factory inputs."""
+    if factory is False and syntax == "ios":
+        obj = IOSCfgLine(txt, comment_delimiter)
+
+    elif factory is False and syntax == "nxos":
+        obj = NXOSCfgLine(txt, comment_delimiter)
+
+    elif factory is False and syntax == "junos":
+        obj = JunosCfgLine(txt, comment_delimiter)
+
+    elif factory is False and syntax == "asa":
+        obj = ASACfgLine(
+            text=txt,
+            comment_delimiter=comment_delimiter,
+        )
+
+    elif syntax in ALL_VALID_SYNTAX:
+        obj = ConfigLineFactory(
+            txt,
+            comment_delimiter,
+            syntax=syntax,
+        )
+
+    else:
+        err_txt = (
+            "Cannot classify config list item '%s' "
+            "into a proper configuration object line" % txt
+        )
+        logger.error(err_txt)
+        raise ValueError(err_txt)
+
+    obj.linenum = idx
+    indent = len(txt) - len(txt.lstrip())
+    obj.indent = indent
+
+    return obj
 
 @logger.catch(reraise=True)
 def build_space_tolerant_regex(linespec):
@@ -299,6 +347,9 @@ def build_space_tolerant_regex(linespec):
     # escaped_space = "\\s+" (not a raw string)
     escaped_space = (backslash + backslash + "s+").translate("utf-8")
 
+    enforce_valid_types(linespec, (str,),
+        "linespec parameter must be a string."
+    )
     if isinstance(linespec, str):
         linespec = re.sub(r"\s+", escaped_space, linespec)
 
@@ -335,7 +386,7 @@ def assign_parent_to_closing_braces(input_list=None):
     if input_list is None:
         raise ValueError("Cannot modify.  The input_list is None")
 
-    input_condition = isinstance(input_list, (list, tuple, MutableSequence))
+    input_condition = isinstance(input_list, Sequence)
     if input_condition is True and len(input_list) > 0:
         opening_brace_objs = []
         for obj in input_list:
@@ -473,6 +524,8 @@ class CiscoConfParse(object):
             logger.error(error)
             raise ValueError(error)
 
+        self.finished_config_parse = False
+
         # all IOSCfgLine object instances...
         self.comment_delimiter = comment
         self.factory = factory
@@ -482,35 +535,28 @@ class CiscoConfParse(object):
         self.encoding = encoding or ENCODING
         self.debug = debug
 
-        # Important: Ensure we have a sane copy of self and self.ConfigObjs...
-        if not isinstance(self, CiscoConfParse):
-            err = "CiscoConfParse() did not populate self.ConfigObjs"
-            raise ValueError(err)
-
-        # FIXME !!! why isn't ConfigObjs an instance of MutableSequence
-        # assert isinstance(self.ConfigObjs, MutableSequence)
-
         # Read the configuration lines and detect invalid inputs...
-        config = self.get_config_lines(config=config, logger=logger)
+        # tmp_lines = self._get_ccp_lines(config=config, logger=logger)
+        if isinstance(config, (str, pathlib.Path,)):
+            tmp_lines = self.read_config_file(filepath=config, logger=logger)
 
-        if self.debug > 0:
-            log_msg = ("assigning self.ConfigObjs = ConfigList(syntax='%s')" % syntax)
-            logger.info(log_msg)
+        elif isinstance(config, Sequence):
+            tmp_lines = config
 
-        valid_syntax = copy.copy(set(ALL_VALID_SYNTAX))
-        # add exceptions for brace-delimited syntax...
-        valid_syntax.discard("junos")
+        else:
+            raise ValueError
 
-        if syntax == "junos":
-            err_msg = ("junos parser factory is not yet enabled; use factory=False")
-            assert factory is False, err_msg
-            config = convert_junos_to_ios(config, comment_delimiter="#")
+        assert self._check_ccp_input_good(config=tmp_lines) is True
+
+        # conditionally strip off junos-config braces and other syntax
+        #     parsing  issues...
+        config_lines = self._handle_ccp_syntax(tmp_lines=tmp_lines, syntax=syntax)
 
         if self.debug > 0:
             logger.info("assigning self.ConfigObjs = ConfigList()")
-        # self.config_list is a partial wrapper around ConfigList()
+
         self.ConfigObjs = ConfigList(
-            initlist=config,
+            initlist=config_lines,
             comment_delimiter=comment,
             debug=debug,
             factory=factory,
@@ -519,14 +565,33 @@ class CiscoConfParse(object):
             ccp_ref=self,
         )
 
+        # IMPORTANT this MUST not be a lie :-)...
+        self.finished_config_parse = True
+
+
+    # This method is on CiscoConfParse()
+    @logger.catch(reraise=True)
+    def _handle_ccp_syntax(self, tmp_lines=None, syntax=None):
+        """Deal with syntax issues, such as conditionally discarding junos closing brace-lines."""
+
+        assert tmp_lines is not None
+        if syntax == "junos":
+            err_msg = ("junos parser factory is not yet enabled; use factory=False")
+            assert self.factory is False, err_msg
+            config_lines = convert_junos_to_ios(tmp_lines, comment_delimiter="#")
+        else:
+            config_lines = tmp_lines
+
+        return config_lines
+
     # This method is on CiscoConfParse()
     @logger.catch(reraise=True)
     def __repr__(self):
         """Return a string that represents this CiscoConfParse object instance.  The number of lines embedded in the string is calculated from the length of the ConfigObjs attribute."""
-        if isinstance(self.ConfigObjs, (list, tuple, MutableSequence)):
-            num_lines = str(len(self.ConfigObjs))
-        elif self.ConfigObjs is None:
-            num_lines = "None"
+        if self.ConfigObjs is None:
+            num_lines = 0
+        elif isinstance(self.ConfigObjs, Sequence):
+            num_lines = len(self.ConfigObjs)
         return (
             "<CiscoConfParse: %s lines / syntax: %s / comment delimiter: '%s' / factory: %s / ignore_blank_lines: %s / encoding: '%s'>"
             % (
@@ -537,55 +602,144 @@ class CiscoConfParse(object):
 
     # This method is on CiscoConfParse()
     @logger.catch(reraise=True)
-    def get_config_lines(self, config=None, logger=None, linesplit_rgx=r"\r*\n+"):
-        """If the config parameter is a str, assume it's a filepath and read the config.  If the config parameter is a list, assume it's a list of text config commands.  Return the list of text configuration commands or raise an error."""
+    def _validate_ConfigObjs(self):
+        """ConfigObjs should be None or an instance of collections.abc.Sequence."""
+        raise RuntimeError
+
+        # Important: Ensure we have a sane copy of self and self.ConfigObjs...
+        if not isinstance(self, CiscoConfParse):
+            err = "CiscoConfParse() did not populate self.ConfigObjs"
+            raise ValueError(err)
+
+        if self.debug > 0:
+            log_msg = ("assigning self.ConfigObjs = ConfigList(syntax='%s')" % self.syntax)
+            logger.info(log_msg)
+
+        if self.ConfigObjs is not None:
+            if not isinstance(self.ConfigObjs, Sequence):
+                err = "self.ConfigObjs must be an instance of collections.abc.Sequence."
+                raise ValueError(err)
+            else:
+                # self.ConfigObjs is an instance of Sequence...
+                return True
+        else:
+            # self.ConfigObjs is None
+            return True
+
+    # This method is on CiscoConfParse()
+    @logger.catch(reraise=True)
+    def read_config_file(self, filepath=None, logger=None, linesplit_rgx=r"\r*\n+"):
+        """Read the config lines from the filepath.  Return the list of text configuration commands or raise an error."""
+
+        assert logger is not None
+        assert self.finished_config_parse is False
+
         config_lines = None
 
-        if config is None:
-            raise ValueError("config='%s' is unsupported.  `config` must be either a python string, patlib.Path, or list" % config)
+        enforce_valid_types(filepath, (str, pathlib.Path),
+            "filepath parameter must be a string or pathlib.Path()."
+        )
 
-        elif isinstance(config, (list, Iterator)):
+        if isinstance(filepath, (str, pathlib.Path,)) and os.path.isfile(filepath) is True:
+            # config string - assume a filename...
+            if self.debug > 0:
+                logger.debug("reading config from the filepath named '%s'" % filepath)
+
+        elif isinstance(filepath, (str, pathlib.Path,)) and os.path.isfile(filepath) is False:
+            if self.debug > 0:
+                logger.debug("filepath not found - '%s'" % filepath)
+            try:
+                _ = open(file=filepath, **self.openargs)
+
+            except FileNotFoundError:
+                error = """FATAL - Attempted to open(file='{0}', mode='r', encoding='{1}'); the filepath named:"{0}" does not exist.""".format(filepath, self.openargs['encoding'])
+                raise FileNotFoundError(error)
+
+            except OSError:
+                error = """FATAL - Attempted to open(file='{0}', mode='r', encoding='{1}'); OSError opening "{0}".""".format(filepath, self.openargs['encoding'])
+                raise OSError(error)
+
+            except Exception:
+                raise RuntimeError
+
+        else:
+            raise ValueError("filepath=\"\"\"%s\"\"\" is an unexpected type().  `filepath` must be a python string or patlib.Path." % filepath)
+
+        # Read the file from disk and return the list of config statements...
+        try:
+            with open(file=filepath, **self.openargs) as fh:
+                text = fh.read()
+            rgx = re.compile(linesplit_rgx)
+            config_lines = rgx.split(text)
+            return config_lines
+
+        except OSError:
+            error = "CiscoConfParse could not open() the filepath named '%s'" % filename
+            logger.critical(error)
+            raise OSError("FATAL - could not open() the config filepath named '{}'".format(filename))
+
+        except Exception as eee:
+            error = "FATAL - {}".format(str(eee))
+            logger.critical(error)
+            raise OSError(error) from eee
+
+    @logger.catch(reraise=True)
+    def _DEPRECATED_read_config_file(self, filename=None, logger=None, linesplit_rgx=r"\r*\n+"):
+        """Read the configuration from a filename."""
+        # config string - assume a filename... open file return lines...
+
+        if not isinstance(filename, (str, pathlib.Path,)):
+            raise ValueError("FATAL - filepath must be a string or pathlib.Path() instance")
+
+        if os.path.isfile(filename) is False:
+            raise OSError("FATAL - could not open() the config filepath named '{}'".format(filename))
+
+        if self.debug > 0:
+            logger.debug("CiscoConfParse().read_config_file() is parsing config from the filepath named '%s'" % filename)
+
+        try:
+            with open(file=filename, **self.openargs) as fh:
+                text = fh.read()
+            rgx = re.compile(linesplit_rgx)
+            config_lines = rgx.split(text)
+            return config_lines
+
+        except OSError:
+            error = "CiscoConfParse could not open() the filepath named '%s'" % filename
+            logger.critical(error)
+            raise OSError("FATAL - could not open() the config filepath named '{}'".format(filename))
+
+        except Exception as eee:
+            error = "FATAL - {}".format(str(eee))
+            logger.critical(error)
+            raise OSError(error) from eee
+
+    # This method is on CiscoConfParse()
+    @logger.catch(reraise=True)
+    def _check_ccp_input_good(self, config=None, logger=None, linesplit_rgx=r"\r*\n+"):
+        """The config parameter is a sequence of text config commands.  Return the list of text configuration commands or raise an error."""
+
+        assert self.finished_config_parse is False
+
+        enforce_valid_types(config, (str, pathlib.Path, Sequence,),
+            "config parameter must be a string, pathlib.Path() or an instance of collections.abc.Sequence()."
+        )
+
+        if False:
+            if isinstance(config, Sequence) and len(config) == 0:
+                # IMPORTANT - explicitly handle an empty config list...
+                raise ValueError("FATAL - the 'config' parameter got an empty {0}".format(type(config)))
+
+        if isinstance(config, Sequence) and len(config) >= 0:
             # Here we assume that `config` is a list of text config lines...
             #
             # config list of text lines...
-            if len(config) == 0:
-                raise ValueError("FATAL - the 'config' parameter has no configuration stored in the list()")
             if self.debug > 0:
-                logger.debug("parsing config stored in this list: '%s'" % config)
-            config_lines = config
-            return config_lines
-
-        elif isinstance(config, (str, pathlib.Path,)) and os.path.isfile(config) is True:
-
-            # config string - assume a filename... open file return lines...
-            if self.debug > 0:
-                logger.debug("parsing config from the filepath named '%s'" % config)
-
-            try:
-                with open(file=config, **self.openargs) as fh:
-                    text = fh.read()
-                rgx = re.compile(linesplit_rgx)
-                config_lines = rgx.split(text)
-                return config_lines
-
-            except OSError:
-                error = "CiscoConfParse could not open() the filepath named '%s'" % config
-                logger.critical(error)
-                raise OSError("FATAL - could not open() the config filepath named '{}'".format(config))
-
-            except Exception as eee:
-                error = "FATAL - {}".format(str(eee))
-                logger.critical(error)
-                raise OSError(error)
-
-        elif isinstance(config, (str, pathlib.Path,)) and os.path.isfile(config) is False:
-            if self.debug > 0:
-                logger.debug("filepath not found - '%s'" % config)
-            error = """FATAL - Attempted to open(file='{0}', mode='r', encoding='{1}'); however, file filepath named:"{0}" does not exist.""".format(config, self.openargs['encoding'])
-            raise ValueError(error)
+                logger.debug("parsing config stored in the config variable: '%s'" % config)
+            return True
 
         else:
-            raise ValueError("config='%s' is an unexpected type().  `config` must be either a python string, patlib.Path, or list" % config)
+            raise ValueError("config=\"\"\"%s\"\"\" is an unexpected type().  The `config` instance must be an instance of collecitons.abc.Sequence" % config)
 
     #########################################################################
     # This method is on CiscoConfParse()
@@ -886,8 +1040,9 @@ class CiscoConfParse(object):
             # branchspec = (r"^interfaces", r"\s+(\S+)", r"\s+(unit\s+\d+)", r"family\s+(inet)", r"address\s+(\S+)")
             # for idx_matrix, row in enumerate(self.find_object_branches(branchspec)):
             for _, row in enumerate(branches):
-                if not isinstance(row, (list, tuple,)):
-                    raise ValueError("'row' parameter must be a list or tuple.")
+                enforce_valid_types(row, (Sequence,),
+                    "row parameter must be an instance of collections.abc.Sequence()."
+                )
 
                 # Before we check regex capture groups, allocate an "empty return_row"
                 #   of the correct length...
@@ -1044,7 +1199,7 @@ class CiscoConfParse(object):
             logger.info(message)
 
         if self.ConfigObjs is None:
-            # ConfigObjs should be a list, tuple or MutableSequence
+            # ConfigObjs should be a list, tuple or Sequence
             err_text = ("CiscoConfParse().ConfigObjs should be a list of "
                         "config lines, but it's not initialized.")
             logger.error(err_text)
@@ -1606,9 +1761,10 @@ class CiscoConfParse(object):
            >>>
         """
 
-        # childspec must be a list or tuple
-        if not isinstance(childspec, (list, tuple,)):
-            raise ValueError
+        # childspec must be an instance of collections.abc.Sequence()
+        enforce_valid_types(childspec, (Sequence,),
+            "childspec parameter must be an instance of collections.abc.Sequence()."
+        )
 
         retval = []
         if ignore_ws is True:
@@ -1660,13 +1816,14 @@ class CiscoConfParse(object):
         list
             A list of matching parent :class:`~models_cisco.IOSCfgLine` objects"""
 
-        if not isinstance(childspec, (list, tuple)):  # Childspec must be a list
-            raise ValueError
+        enforce_valid_types(childspec, (Sequence,),
+            "childspec parameter must be an instance of collections.abc.Sequence()."
+        )
 
         retval = []
         if ignore_ws is True:
             parentspec = build_space_tolerant_regex(parentspec)
-            if isinstance(childspec, list):
+            if isinstance(childspec, Sequence):
                 childspec = [build_space_tolerant_regex(ii) for ii in childspec]
 
             else:
@@ -2286,12 +2443,16 @@ class CiscoConfParse(object):
         err_new_val = "FATAL: new_val:'%s' must be a string" % new_val
         if not isinstance(new_val, str) or new_val =="":
             raise ValueError(err_new_val)
-        if not isinstance(exactmatch, bool):
-            raise ValueError
-        if not isinstance(ignore_ws, bool):
-            raise ValueError
-        if not isinstance(new_val_indent, int):
-            raise ValueError
+
+        enforce_valid_types(exactmatch, (bool,),
+            "exactmatch parameter must be a bool."
+        )
+        enforce_valid_types(ignore_ws, (bool,),
+            "ignore_ws parameter must be a bool."
+        )
+        enforce_valid_types(new_val_indent, (int,),
+            "new_val_indent parameter must be a int."
+        )
 
         objs = self.find_objects(linespec=exist_val, exactmatch=exactmatch, ignore_ws=ignore_ws)
         for _obj in objs:
@@ -2388,16 +2549,21 @@ class CiscoConfParse(object):
 
         err_exist_val = "FATAL: exist_val:'%s' must be a string" % exist_val
         err_new_val = "FATAL: new_val:'%s' must be a string" % new_val
-        if not isinstance(exist_val, str) or exist_val == "":
-            raise ValueError(err_exist_val)
-        if not isinstance(new_val, str) or new_val == "":
-            raise ValueError(err_new_val)
-        if not isinstance(exactmatch, bool):
-            raise ValueError
-        if not isinstance(ignore_ws, bool):
-            raise ValueError
-        if not isinstance(new_val_indent, int):
-            raise ValueError
+        enforce_valid_types(exist_val, (str,),
+            err_exist_val
+        )
+        enforce_valid_types(new_val, (str,),
+            err_new_val
+        )
+        enforce_valid_types(exactmatch, (bool,),
+            "exactmatch must be a bool"
+        )
+        enforce_valid_types(ignore_ws, (bool,),
+            "ignore_ws must be a bool"
+        )
+        enforce_valid_types(new_val_indent, (int,),
+            "new_val_indent must be a int"
+        )
 
         objs = self.find_objects(linespec=exist_val, exactmatch=exactmatch, ignore_ws=ignore_ws)
         for _obj in objs:
@@ -2886,7 +3052,7 @@ class CiscoConfParse(object):
 
         .. warning::
 
-           `sync_diff()`, `req_cfgspec_excl_diff()` and `req_cfgspec_all_diff()` will be deprecated / removed in the future.  `HDiff().unified_diffs()` or `HDiff().raw_diff_dicts()` can be used going forward; however, "some assembly will be required".
+           `req_cfgspec_excl_diff()` and `req_cfgspec_all_diff()` will be deprecated / removed in the future.  `HDiff().unified_diffs()` or `HDiff().raw_diff_dicts()` can be used going forward; however, "some assembly will be required".
 
 
         Examples
@@ -2956,7 +3122,7 @@ class CiscoConfParse(object):
 
         .. warning::
 
-           `sync_diff()`, `req_cfgspec_excl_diff()` and `req_cfgspec_all_diff()` will be deprecated / removed in the future.  `HDiff().unified_diffs()` or `HDiff().raw_diff_dicts()` can be used going forward; however, "some assembly will be required".
+           `req_cfgspec_excl_diff()` and `req_cfgspec_all_diff()` will be deprecated / removed in the future.  `HDiff().unified_diffs()` or `HDiff().raw_diff_dicts()` can be used going forward; however, "some assembly will be required".
 
         Examples
         --------
@@ -3131,11 +3297,11 @@ class CiscoConfParse(object):
 
     # This method is on CiscoConfParse()
     @logger.catch(reraise=True)
-    @deprecat(reason="sync_diff() is obsolete; use HDiff() instead.  sync_diff() will be removed", version = '1.7.0')
+    @deprecat(reason="sync_diff() is obsolete; use HDiff() instead.", version = '1.7.0')
     def sync_diff(
         self,
-        cfgspec,
-        linespec,
+        cfgspec=None,
+        linespec=None,
         uncfgspec=None,
         ignore_order=True,
         remove_lines=True,
@@ -3144,18 +3310,14 @@ class CiscoConfParse(object):
         r"""
         ``sync_diff()`` accepts a list of required configuration elements,
         a linespec, and an unconfig spec.  This method return a list of
-        configuration diffs to make the configuration comply with cfgspec.
-
-
-        .. warning::
-
-           `sync_diff()`, `req_cfgspec_excl_diff()` and `req_cfgspec_all_diff()` will be deprecated / removed in the future.  `HDiff().unified_diffs()` or `HDiff().raw_diff_dicts()` can be used going forward; however, "some assembly will be required".
+        Cisco IOS-style configuration diffs to make the configuration comply
+        with cfgspec.
 
 
         Parameters
         ----------
         cfgspec : list
-            A list of required configuration lines
+            A list of required configuration lines to be used as a config template
         linespec : str
             A regular expression, which filters lines to be diff'd
         uncfgspec : str
@@ -3191,331 +3353,96 @@ class CiscoConfParse(object):
         ...     "logging 192.168.1.1",
         ...     ]
         >>> linespec = "logging\s+\d+\.\d+\.\d+\.\d+"
-        >>> unconfspec = linespec
+        >>> uncfgspec = linespec
         >>> diffs = p.sync_diff(required_lines,
-        ...     linespec, unconfspec) # doctest: +SKIP
+        ...     linespec, uncfgspec)  # doctest: +SKIP
         >>> diffs                     # doctest: +SKIP
         ['no logging 172.28.26.15', 'logging 172.16.1.5', 'logging 1.10.20.30', 'logging 192.168.1.1']
         >>>
+        >>> diff.all_output_dicts
+        [
+        {'linenum': -1, 'diff_side': 'before', 'diff_word': 'remove', 'text': 'logging trap debugging'},
+        {'linenum': -1, 'diff_side': 'before', 'diff_word': 'remove', 'text': 'logging 172.28.26.15'},
+        {'linenum': -1, 'diff_side': 'before', 'diff_word': 'keep', 'text': 'logging 1.10.20.30'},
+        {'linenum': 0, 'diff_side': 'after', 'diff_word': 'add', 'text': 'logging 172.16.1.5'},
+        {'linenum': 2, 'diff_side': 'after', 'diff_word': 'add', 'text': 'logging 192.168.1.30'},
+        {'linenum': 3, 'diff_side': 'after', 'diff_word': 'add', 'text': 'hostname FOO'},
+        ]
+        >>>
+        >>>
         """
+        if cfgspec is None:
+            cfgspec = self._list
 
-        # warning issued 2022-06-01
-        deprecation_warn_str = "`sync_diff()` will be deprecated and removed in future versions."
-        warnings.warn(deprecation_warn_str, DeprecationWarning)
+        if linespec is None:
+            raise ValueError("linespec is a required parameter")
 
-        if not isinstance(cfgspec, (list, tuple, Iterator)):
-            raise ValueError("FATAL - `cfgspec` requires a python Iterable, typically a `list()`.")
-        if not isinstance(linespec, str) or len(linespec) == 0:
-            raise ValueError("FATAL - `linespec` requires a python string.")
-        if not isinstance(unconfspec, str) or len(unconfspec) == 0:
-            raise ValueError("FATAL - `unconfspec` requires a python string.")
+        enforce_valid_types(cfgspec, (Sequence,),
+            "cfgspec must be an instance of collections.abc.Sequence()"
+        )
+        enforce_valid_types(linespec, (str,),
+            "linespec must be a string"
+        )
+        enforce_valid_types(uncfgspec, (str,),
+            "uncfgspec must be a string"
+        )
+        enforce_valid_types(ignore_order, (bool,),
+            "ignore_order must be a bool"
+        )
+        enforce_valid_types(remove_lines, (bool,),
+            "remove_lines must be a bool"
+        )
+        enforce_valid_types(debug, (int,),
+            "debug must be an int"
+        )
 
-        tmp = self._find_line_OBJ(linespec)
-        if uncfgspec is None:
-            uncfgspec = linespec
-        a_lines = [ii.text for ii in tmp]
-        a = CiscoConfParse(config=a_lines)
+        lrgx = re.compile(linespec)
+        retval = []
 
-        b = CiscoConfParse(config=cfgspec, factory=False)
-        b_lines = b.ioscfg
+        diff = HDiff(before_config=self.ioscfg, after_config=cfgspec, syntax='ios', debug=debug)
 
-        a_hierarchy = list()
-        b_hierarchy = list()
+        for tmp in diff.all_output_dicts:
 
-        ## Build heirarchical, equal-length lists of parents / non-parents
-        a_parents, a_nonparents = a.ConfigObjs.config_hierarchy()
-        b_parents, b_nonparents = b.ConfigObjs.config_hierarchy()
+            action = tmp["diff_word"]
+            command = tmp["text"]
+            indent = tmp["indent"]
+            parents = tmp["parents"]
 
-        obj = DiffObject(0, a_nonparents, a_parents)
-        a_hierarchy.append(obj)
+            # Skip lines that are not part of the expected diff...
+            if not lrgx.search(command):
+                continue
 
-        obj = DiffObject(0, b_nonparents, b_parents)
-        b_hierarchy.append(obj)
+            if remove_lines is True and action == 'remove':
+                if self.syntax in set({"ios", "nxos", "asa", }):
+                    uu = re.search(uncfgspec, command)
+                    remove_cmd = indent*" " + "no " + uu.group(0).strip()
 
-        retval = list()
-        ## Assign config_this and unconfig_this attributes by "diff level"
-        for adiff_level, bdiff_level in zip(a_hierarchy, b_hierarchy):
-            for attr in ["parents", "nonparents"]:
-                if attr == "parents":
-                    if ignore_order:
-                        a_parents = getattr(adiff_level, attr)
-                        b_parents = getattr(bdiff_level, attr)
+                    # NOTE: if HDiff().compress_dict_diffs() was working as
+                    # planned, this manual parent handling might not be
+                    # required...
+                    #
+                    # Append parent remove_cmd command entries (if any...)
+                    for pcmd in parents:
+                        retval.append(pcmd)
 
-                        # Rewrite a, since we reordered everything
-                        a, a_lines, a_linenums = self._sequence_parent_lines(
-                            a_parents, b_parents,
-                        )
-                    else:
-                        a_lines = list()
-                        a_linenums = list()
-                        for obj in adiff_level.parents:
-                            a_lines.append(obj.text)
-                            a_linenums.append(obj.linenum)
-                            a_lines.extend(
-                                [ii.text for ii in obj.all_children],
-                            )
-                            a_linenums.extend(
-                                [ii.linenum for ii in obj.all_children],
-                            )
-                    b_lines = list()
-                    b_linenums = list()
-                    for obj in bdiff_level.parents:
-                        b_lines.append(obj.text)
-                        b_linenums.append(obj.linenum)
-                        b_lines.extend(
-                            [ii.text for ii in obj.all_children],
-                        )
-                        b_linenums.extend(
-                            [ii.linenum for ii in obj.all_children],
-                        )
+                    retval.append(remove_cmd)
                 else:
-                    if ignore_order:
-                        a_nonparents = getattr(adiff_level, attr)
-                        b_nonparents = getattr(bdiff_level, attr)
+                    raise ValueError("Cannot remove the command for syntax={}".format(self.syntax))
 
-                        # Rewrite a, since we reordered everything
-                        a, a_lines, a_linenums = self._sequence_nonparent_lines(
-                            a_nonparents, b_nonparents,
-                        )
-                    else:
-                        a_lines = [ii.text for ii in getattr(adiff_level, attr)]
-                        # Build a map from a_lines index to a.ConfigObjs index
-                        a_linenums = [ii.linenum for ii in getattr(adiff_level, attr)]
-                    b_lines = [ii.text for ii in getattr(bdiff_level, attr)]
-                    # Build a map from b_lines index to b.ConfigObjs index
-                    b_linenums = [ii.linenum for ii in getattr(bdiff_level, attr)]
+            elif action == 'add':
 
-                ###
-                ### Mark diffs here
-                ###
+                # NOTE: if HDiff().compress_dict_diffs() was working as
+                # planned, this manual parent handling might not be
+                # required...
+                #
+                # Append parent command entries (if any...)
+                for pcmd in parents:
+                    retval.append(pcmd)
 
-                # Get a SequenceMatcher instance to calculate diffs at this level
-                matcher = difflib.SequenceMatcher(isjunk=None, a=a_lines, b=b_lines)
+                retval.append(command)
 
-                # Use the SequenceMatcher instance to label objects appropriately:
-                #  - tag is the diff evaluation: equal, replace, insert, or delete
-                #  - i1 and i2 are the begin and end points for arg a
-                #  - j1 and j2 are the begin and end points for arg b
-                for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                    # print ("%7s a[%d:%d] (%s) b[%d:%d] (%s)" % (tag, i1, i2, a_lines[i1:i2], j1, j2, b_lines[j1:j2]))
-                    if (debug > 0) or (self.debug > 0):
-                        logger.debug("TAG='{}'".format(tag))
-
-                    # if tag=='equal', check whether the parent objs are the same
-                    #     if parent objects are the same, then do nothing
-                    #     if parent objects are different, then delete a & config b
-                    # if tag=='replace'
-                    #     delete a & config b
-                    # if tag=='insert', then configure b
-                    aobjs = list(
-                    )  # List of a IOSCfgLine objects at this level
-                    bobjs = list(
-                    )  # List of b IOSCfgLine objects at this level
-                    for num in range(i1, i2):
-                        aobj = a.ConfigObjs[a_linenums[num]]
-                        aobjs.append(aobj)
-                    for num in range(j1, j2):
-                        bobj = b.ConfigObjs[b_linenums[num]]
-                        bobjs.append(bobj)
-
-                    max_len = max(len(aobjs), len(bobjs))
-                    for idx in range(0, max_len):
-                        try:
-                            aobj = aobjs[idx]
-                            # set aparent_text to all parents' text (joined)
-                            aparent_text = " ".join(
-                                #map(lambda x: x.text, aobj.all_parents)
-                                [ii.text for ii in aobj.all_parents],
-                            )
-                        except IndexError:
-                            # aobj doesn't exist, if we get an index error
-                            #    fake some data...
-                            aobj = None
-                            aparent_text = "__ANOTHING__"
-                        if (debug > 0) or (self.debug > 0):
-                            logger.debug("    aobj:'{}'".format(aobj))
-                            logger.debug(
-                                "    aobj parents:'{}'".format(aparent_text),
-                            )
-
-                        try:
-                            bobj = bobjs[idx]
-                            # set bparent_text to all parents' text (joined)
-                            bparent_text = " ".join(
-                                #map(lambda x: x.text, bobj.all_parents)
-                                [ii.text for ii in bobj.all_parents],
-                            )
-                        except IndexError:
-                            # bobj doesn't exist, if we get an index error
-                            #    fake some data...
-                            bobj = None
-                            bparent_text = "__BNOTHING__"
-
-                        if (debug > 0) or (self.debug > 0):
-                            logger.debug("    bobj:'{}'".format(bobj))
-                            logger.debug(
-                                "    bobj parents:'{}'".format(bparent_text),
-                            )
-
-                        if tag == "equal":
-                            # If the diff claims that these lines are equal, they
-                            #   aren't truly equal unless parents match
-                            if aparent_text != bparent_text:
-                                if (debug > 0) or (self.debug > 0):
-                                    logger.debug(
-                                        "    tagged 'equal', aparent_text!=bparent_text",
-                                    )
-                                # a & b parents are *not* the same
-                                #  therefore a & b are not equal
-                                if aobj:
-                                    # Only configure parent if it's not already
-                                    #    slated for removal
-                                    if not getattr(
-                                        aobj.parent,
-                                        "unconfig_this", False,
-                                    ):
-                                        aobj.parent.config_this = True
-                                    aobj.unconfig_this = True
-                                    if debug > 0:
-                                        logger.debug(
-                                            "    unconfigure aobj",
-                                        )
-                                if bobj:
-                                    bobj.config_this = True
-                                    bobj.parent.config_this = True
-                                    if debug > 0:
-                                        logger.debug("    configure bobj")
-                            elif aparent_text == bparent_text:
-                                # Both a & b parents match, so these lines are equal
-                                aobj.unconfig_this = False
-                                bobj.config_this = False
-                                if debug > 0:
-                                    logger.debug(
-                                        "    tagged 'equal', aparent_text==bparent_text",
-                                    )
-                                    logger.debug(
-                                        "    do nothing with aobj / bobj",
-                                    )
-                        elif tag == "replace":
-                            # tag: replace, I'm not going to check parents for now
-                            if debug > 0:
-                                logger.debug("    tagged 'replace'")
-                            if aobj:
-                                # Only configure parent if it's not already
-                                #    slated for removal
-                                if not getattr(
-                                    aobj.parent, "unconfig_this",
-                                    False,
-                                ):
-                                    aobj.parent.config_this = True
-                                aobj.unconfig_this = True
-                                if debug > 0:
-                                    logger.debug("    unconfigure aobj")
-                            if bobj:
-                                bobj.config_this = True
-                                bobj.parent.config_this = True
-                                if debug > 0:
-                                    logger.debug("    configure bobj")
-                        elif tag == "insert":
-                            if debug > 0:
-                                logger.debug("    tagged 'insert'")
-                            # I don't think tag: insert ever applies to a objects...
-                            if aobj:
-                                # Only configure parent if it's not already
-                                #    slated for removal
-                                if not getattr(
-                                    aobj.parent, "unconfig_this",
-                                    False,
-                                ):
-                                    aobj.parent.config_this = True
-                                aobj.unconfig_this = True
-                                if debug > 0:
-                                    logger.debug("    unconfigure aobj")
-                            # tag: insert certainly applies to b objects...
-                            if bobj:
-                                bobj.config_this = True
-                                bobj.parent.config_this = True
-                                if debug > 0:
-                                    logger.debug("    configure bobj")
-                        elif tag == "delete":
-                            # NOTE: I'm not deleting b objects, for now
-                            if debug > 0:
-                                logger.debug("    tagged 'delete'")
-                            if aobj:
-                                # Only configure parent if it's not already
-                                #    slated for removal
-                                for pobj in aobj.all_parents:
-                                    if not getattr(
-                                        pobj, "unconfig_this",
-                                        False,
-                                    ):
-                                        pobj.config_this = True
-                                aobj.unconfig_this = True
-                                if debug > 0:
-                                    logger.debug("    unconfigure aobj")
-                        else:
-                            error = "Unknown action: {}".format(tag)
-                            logger.error(error)
-                            raise ValueError(error)
-
-                ###
-                ### Write a object diffs here
-                ###
-
-                ## Unconfigure A objects, at *each level*, as required
-                for obj in a.ConfigObjs:
-                    if remove_lines and getattr(obj, "unconfig_this", False):
-                        ## FIXME: This should only be applied to IOS and ASA configs
-                        if uncfgspec:
-                            mm = re.search(uncfgspec, obj.text)
-                            if (mm is not None):
-                                obj.add_uncfgtext(mm.group(0))
-                                retval.append(obj.uncfgtext)
-                            else:
-                                retval.append(
-                                    " " * obj.indent + "no " +
-                                    obj.text.lstrip(),
-                                )
-                        else:
-                            retval.append(
-                                " " * obj.indent + "no " +
-                                obj.text.lstrip(),
-                            )
-                    elif remove_lines and getattr(obj, "config_this", False):
-                        retval.append(obj.text)
-
-                    # Clean up the attributes we used temporarily in this method
-                    for attr in ["config_this", "unconfig_this"]:
-                        try:
-                            delattr(obj.text, attr)
-                        except Exception:
-                            pass
-
-        ###
-        ### Write b object diffs here
-        ###
-        for obj in b.ConfigObjs:
-            if getattr(obj, "config_this", False):
-                retval.append(obj.text)
-
-            # Clean up the attributes we used temporarily in this method
-            try:
-                delattr(obj.text, "config_this")
-            except Exception:
-                pass
-
-        ## Strip out 'double negatives' (i.e. 'no no ')
-        for idx in range(0, len(retval)):
-            retval[idx] = re.sub(
-                r"(\s+)no\s+no\s+(\S+.+?)$", r"\g<1>\g<2>",
-                retval[idx],
-            )
-
-        if debug > 0:
-            logger.debug("Completed diff:")
-            for line in retval:
-                logger.debug("'{}'".format(line))
         return retval
+
 
     # This method is on CiscoConfParse()
     @logger.catch(reraise=True)
@@ -3614,10 +3541,8 @@ class CiscoConfParse(object):
         return retval
 
 
-#########################################################################3
 class HDiff(object):
-    """
-    """
+    """An object to implement diffs against configs or config templates.  By default, the output diffs are ordered roughly as before_config, then after_config."""
 
     # This method is on HDiff()
     @logger.catch(reraise=True)
@@ -3631,67 +3556,137 @@ class HDiff(object):
         output_format="unified",
         debug=0,
     ):
-
         """
-        If ordered_diff is False, perform an *unordered diff* on the two lists
-        of configuration lines.
+        Initialize HDiff().
 
-        $ diff -u0 <(echo "a\nb\nc") <(echo "a\nb\nb")
-        --- /dev/fd/63  2022-04-07 04:24:32.794608252 -0500
-        +++ /dev/fd/62  2022-04-07 04:24:32.794608252 -0500
-        @@ -1 +1 @@
-        -a\nb\nc
-        +a\nb\nb
+        Parameters
+        ----------
+        before_config : list
+            A list of text configuration statements representing the original config. Default value: `None`
+        after_config : list
+            A list of text configuration statements representing the most-recent config. Default value: `None`
+        syntax : str
+            A string holding the configuration type.  Default: 'ios'.  Must be one of: 'ios', 'nxos', 'asa', 'junos'.  Use 'junos' for any brace-delimited network configuration (including F5, Palo Alto, etc...).
+        ordered_diff : bool
+            A boolean for whether the returned-diff lines must be ordered.  Default value: `False`
+        allow_duplicates : bool
+            A boolean for whether the returned-diff lines may be duplicated.  Default value: `False`
+        debug : int
+            ``debug`` defaults to 0, and should be kept that way unless you're working on a tricky config diff problem.  Debug range goes from 0 (no debugging) to 5 (max debugging).  Debug output is not particularly friendly.
 
+
+        Returns
+        -------
+        :class:`~ciscoconfparse.HDiff`
+
+        Examples
+        --------
+        This example illustrates how to diff a simple Cisco IOS configuration
+        with :class:`~ciscoconfparse.HDiff` into a variable called
+        ``parse``.  This example also illustrates what the ``ConfigObjs``
+        and ``ioscfg`` attributes contain.
+
+        >>> from ciscoconfparse import HDiff
+        >>> begin_config = [
+        ...     'logging trap debugging',
+        ...     'logging 172.28.26.15',
+        ...     'interface GigabitEthernet0',
+        ...     ' ip address 1.1.1.1 255.255.255.0',
+        ...     ]
+        >>> desired_config = [
+        ...     'no logging console guaranteed',
+        ...     'logging 172.28.26.15',
+        ...     'interface GigabitEthernet0',
+        ...     ' no ip proxy-arp',
+        ...     ]
+        >>>
+        >>> # by default, diffs are ordered as before_config then after_config
+        >>> diff_obj = HDiff(begin_config, desired_config, ordered_diff=False)
+        >>> diff_obj
+        <ciscoconfparse.ciscoconfparse.HDiff object at 0x7f8fd292c160>
+        >>> for line in diff_obj.unified_diffs():
+        ...     print(line)
+        ...
+        --- /tmp/before 2023-02-10 09:22:08.476463
+        +++ /tmp/after  2023-02-10 09:22:08.476463
+        @@ -2,1 +2,1 @@
+        -logging trap debugging
+         logging 172.28.26.15
+         interface GigabitEthernet0
+        + no ip proxy-arp
+        - ip address 1.1.1.1 255.255.255.0
+        +no logging console-guaranteed
+        >>>
+        >>>
+        >>> for elem in diff_obj.all_output_dicts:
+        ...     print(elem)
+        ...
+        {'linenum': -1, 'diff_side': 'before', 'diff_word': 'remove', 'indent': 0, 'parents': [], 'text': 'logging trap debugging'}
+        {'linenum': -1, 'diff_side': 'before', 'diff_word': 'keep', 'indent': 0, 'parents': [], 'text': 'logging 172.28.26.15'}
+        {'linenum': -1, 'diff_side': 'before', 'diff_word': 'keep', 'indent': 0, 'parents': [], 'text': 'interface GigabitEthernet0'}
+        {'linenum': 3, 'diff_side': 'after', 'diff_word': 'add', 'indent': 1, 'parents': ['interface GigabitEthernet0'], 'text': ' no ip proxy-arp'}
+        {'linenum': -1, 'diff_side': 'before', 'diff_word': 'remove', 'indent': 1, 'parents': ['interface GigabitEthernet0'], 'text': ' ip address 1.1.1.1 255.255.255.0'}
+        {'linenum': 0, 'diff_side': 'after', 'diff_word': 'add', 'indent': 0, 'parents': [], 'text': 'no logging console-guaranteed'}{'linenum': -1, 'diff_side': 'before', 'diff_word': 'remove', 'indent': 0, 'parents': [], 'text': 'logging trap debugging'}
+        >>>
+
+        Attributes
+        ----------
+        parse_before : :class:`~ciscoconfparse.CiscoConfParse`
+            The parsed object for `CiscoConfParse(before_config)`
+        parse_after : :class:`~ciscoconfparse.CiscoConfParse`
+            The parsed object for `CiscoConfParse(after_config)`
+        all_output_dicts : list
+            A `list` of all the output dicts
         """
-        if not (isinstance(before_config, list) or os.path.isfile(before_config)):
-            raise ValueError
-        if not (isinstance(after_config, list) or os.path.isfile(after_config)):
-            raise ValueError
-        if not isinstance(syntax, str):
-            raise ValueError
-        assert syntax in set({"ios", "junos"})
-        if not isinstance(allow_duplicates, bool):
-            raise ValueError
-        if not isinstance(output_format, str):
-            raise ValueError
-        assert output_format in set({"dict", "unified"})
+
+        enforce_valid_types(before_config, (str, Sequence,),
+            "before_config parameter must be a instance of string or collections.abc.Sequence."
+        )
+        enforce_valid_types(after_config, (str, Sequence,),
+            "after_config parameter must be a instance of string or collections.abc.Sequence."
+        )
+        enforce_valid_types(syntax, (str,),
+            "syntax parameter must be a str."
+        )
+        enforce_valid_types(ordered_diff, (bool,),
+            "ordered_diff parameter must be a bool."
+        )
+        enforce_valid_types(allow_duplicates, (bool,),
+            "allow_duplicates parameter must be a bool."
+        )
+        enforce_valid_types(debug, (int,),
+            "debug parameter must be an int."
+        )
+        assert syntax in set(ALL_VALID_SYNTAX)
 
         # TODO - incorporate difflib.get_close_matches() to reorder the
         #     diff (in unified format)
+        self.parse_before = CiscoConfParse(before_config, syntax=syntax, ignore_blank_lines=False)
+        self.parse_after = CiscoConfParse(after_config, syntax=syntax, ignore_blank_lines=False)
 
-        # FIXME -> no support for an ordered_diff yet... specifically, parents are
-        # not ordered yet and siblings are not ordered either in the diff results.
-        # The ordered_diff bool support should order diff parents lines (such as
-        # ^interface foo) in the same manner that they show up in the after_lines
-        # parameter...
-        if isinstance(ordered_diff, bool):
-            assert ordered_diff is False
-        # FIXME ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        #       no ordered_diff support yet
+        for before_obj in self.parse_before.objs:
+            before_obj.diff_side = "before"
 
-        parse_before = CiscoConfParse(before_config, syntax=syntax, ignore_blank_lines=False)
-        parse_after = CiscoConfParse(after_config, syntax=syntax, ignore_blank_lines=False)
+        for after_obj in self.parse_after.objs:
+            after_obj.diff_side = "after"
 
-        for bobj in parse_before.objs:
-            bobj.diff_side = "before"
-
-        for aobj in parse_after.objs:
-            aobj.diff_side = "after"
-
+        self.ordered_diff = ordered_diff
         # Initialize the output attributes...
         self.before_obj_list = None
         self.after_obj_list = None
-        self.all_output_dicts = list()
+        # all_output_dicts contains the diff results as a list of dicts...
+        self.all_output_dicts = []
+        self.debug = debug
 
         default_diff_word_before = "remove"
         default_diff_word_after = "unknown"
         valid_after_obj_diff_words = set({"add", "unchanged"})
+
         self.before_obj_list = self.build_diff_obj_list(
-            parse=parse_before, default_diff_word=default_diff_word_before
+            parse=self.parse_before, default_diff_word=default_diff_word_before
         )
         self.after_obj_list = self.build_diff_obj_list(
-            parse=parse_after, default_diff_word=default_diff_word_after
+            parse=self.parse_after, default_diff_word=default_diff_word_after
         )
 
         # Handle add / move / change. change is diff_word: remove + diff_word: add
@@ -3711,19 +3706,23 @@ class HDiff(object):
 
             # Ensure that we rewrote after_obj.diff_word from default_diff_word_after
             assert after_obj.diff_word in valid_after_obj_diff_words
-        # Relocate end
 
         # At this stage, `dict_diffs()` returns duplicate parent lines...
         tmp_line_dicts = self.dict_diffs(self.before_obj_list, self.after_obj_list)
 
         # Remove duplicate parent lines with `compress_dict_diffs()`
-        self.all_output_dicts = self.compress_dict_diffs(tmp_line_dicts)
+        self.all_output_dicts = self.compress_dict_diffs(tmp_line_dicts, debug=debug)
 
-        self.sort_lines(parse_after, self.all_output_dicts)
+        if False:
+            # status quo sorts before_config lines, then after_config lines...
+            #
+            # There is no support for special sorting behavior at this point...
+            self.sort_lines()
+
 
     # This method is on HDiff()
     @logger.catch(reraise=True)
-    def raw_diff_dicts(self):
+    def DEPRECATED_raw_diff_dicts(self):
         return self.all_output_dicts
 
     # This method is on HDiff()
@@ -3742,6 +3741,9 @@ class HDiff(object):
 
         # return the unified diff header output... suitable for ydiff
         unified_diff_header = list()
+
+        # Add a text header similar to that found in unix unified diffs
+        #
         # Tally lines for the unified diff header...
         udiff_timestamp = str(datetime.now().isoformat()).replace("T", " ")
         unified_diff_header.append("--- /tmp/before " + udiff_timestamp)
@@ -3807,17 +3809,25 @@ class HDiff(object):
 
     # This method is on HDiff()
     @logger.catch(reraise=True)
-    def sort_lines(self, after_lines, all_output_dicts):
+    def sort_lines(self, after_lines=None):
         """
         Typical output line dict-format...
         {
             "linenum": -1,   # before line numbers are skipped...
             "diff_side": "before",
             "diff_word": "keep",
+            "indent": 0,
+            "parents": [],
             "text": bobj.text,
             "diff_id_list": bobj.diff_id_list,
         }
         """
+        # FIXME -> no support for an ordered_diff yet... specifically, parents are
+        # not ordered yet and siblings are not ordered either in the diff results.
+        # The ordered_diff bool support should order diff parents lines (such as
+        # ^interface foo) in the same manner that they show up in the after_config
+        # parameter...
+        #
         pass
 
     # This method is on HDiff()
@@ -3843,6 +3853,8 @@ class HDiff(object):
                         "linenum": -1,   # For now, do not include bobj.linenum
                         "diff_side": "before",
                         "diff_word": "keep",
+                        "indent": bobj.indent,
+                        "parents": [ii.text for ii in bobj.all_parents],
                         "text": bobj.text,
                         "diff_id_list": bobj.diff_id_list,
                     }
@@ -3856,6 +3868,8 @@ class HDiff(object):
                         "linenum": -1,   # For now, do not include bobj.linenum
                         "diff_side": "before",
                         "diff_word": "remove",
+                        "indent": bobj.indent,
+                        "parents": [ii.text for ii in bobj.all_parents],
                         "text": bobj.text,
                         "diff_id_list": bobj.diff_id_list,
                     }
@@ -4021,6 +4035,8 @@ class HDiff(object):
                         "linenum": aobj.linenum,
                         "diff_side": "after",
                         "diff_word": aobj.diff_word,
+                        "indent": aobj.indent,
+                        "parents": [ii.text for ii in aobj.all_parents],
                         "text": aobj.text,
                         "diff_id_list": aobj.diff_id_list,
                     }
@@ -4037,6 +4053,8 @@ class HDiff(object):
                     "linenum": aobj.linenum,
                     "diff_side": "after",
                     "diff_word": aobj.diff_word,
+                    "indent": aobj.indent,
+                    "parents": [ii.text for ii in aobj.all_parents],
                     "text": aobj.text,
                     "diff_id_list": aobj.diff_id_list,
                 }
@@ -4055,24 +4073,25 @@ class HDiff(object):
 
     # This method is on HDiff()
     @logger.catch(reraise=True)
-    def compress_dict_diffs(self, all_lines=None):
+    def compress_dict_diffs(self, all_lines=None, debug=0):
         """
         Summary
         -------
 
-        - Accept a list of diff dicts (diff dicts are hereafter known as
-          a "line_dict")
-        - Note that duplicate line_dict parent lines may exist in the input
+        - Accept a list of diff dicts (diff dicts are hereafter known as a "line")
+        - Note that duplicate line parent lines may exist in the input
         - Organize the lines such that diff parent lines (example: interface Foo) are not duplicated.
-        - Return the updated and reorganized line list.
+        - Return the updated and reorganized line (dict) list.
 
-        A `line_dict` line will look similar to this:
+        A `line` dict will look similar to this:
 
         ```
         {
             'linenum': -1,          # do not save the before linenum
             'diff_side': 'before',
             'diff_word': 'remove',
+            'indent': 1,
+            'parents': [],
             'text': ' some command here',
             'diff_id_list': [-7805827718597648250, -565516812775864492]
         }
@@ -4081,124 +4100,141 @@ class HDiff(object):
         Note that the `diff_id_list` key above contains a list of `hash()`
         values which are calculated as a unique identifier for the combination
         of parent and child objects.  This list of hashes is required because
-        it's possible for multiple parents to have the same child (for instance
-        the same IOS description child on multiple parents).
+        it's possible for multiple parents to have the same child command (for
+        instance the same 'no ip proxy-arp' child on multiple interface parent
+        lines).
 
-        Please note that a line object will not get the same `hash()` value for
-        different script runs of the same code.
+        Please note that a config command object will not get the same `hash()`
+        value for different script runs of the same code.
         """
 
         # all_lines must be a python list
         if not isinstance(all_lines, list):
             raise ValueError
-        # all instances in `all_lines` must be dicts
-        assert False not in [isinstance(ii, dict) for ii in all_lines]
-        for dict_line in all_lines:
-            assert set(dict_line.keys()) == set(
+
+        # Ensure that all_line dict entries have the correct keys...
+        for line in all_lines:
+            assert set(line.keys()) == set(
                 {
                     "linenum",
                     "diff_side",
                     "diff_word",
+                    "indent",
+                    "parents",
                     "text",
                     "diff_id_list",
                 }
             )
 
-        all_output_dicts = list()
-        all_dict_lines = dict()
+        retval = []
+        lines = dict()   # lines, indexed by diff_id
 
-        for dict_line in all_lines:
+        if debug > 0:
+            logger.info("compress_dict_diffs() will iterate over the `all_lines` variable.")
+        for line in all_lines:
+            assert isinstance(line, dict)
 
-            # Unwrap keywords and values from the dict_line...
-            diff_side = dict_line["diff_side"]
-            diff_word = dict_line["diff_word"]
-            diff_id_list = tuple(dict_line["diff_id_list"])
+            if debug > 0:
+                logger.debug("compress_dict_diffs()")
+                logger.debug("""compress_dict_diffs() - `line`""".format(line))
+
+            # Unwrap keywords and values from the line...
+            diff_side = line["diff_side"]
+            diff_word = line["diff_word"]
+            diff_id_list = tuple(line["diff_id_list"])
             diff_id_list_len = len(diff_id_list)
             diff_id_list_csv = ",".join([str(ii) for ii in diff_id_list])
-            text = dict_line["text"]
+            text = line["text"]
 
             # Remove some lines from consideration...
-            if all_dict_lines.get(diff_id_list, None) is not None:
+            if lines.get(diff_id_list, None) is not None:
                 continue
 
-            # Calculate the next index for all_output_dicts...
-            if all_output_dicts == []:
-                next_list_index = 0
-            else:
-                next_list_index = len(all_output_dicts)
-
             if diff_side == "before" and diff_word == "keep":
-                all_output_dicts.append(dict_line)
-                all_dict_lines[diff_id_list] = len(all_output_dicts) - 1
+                if debug > 0:
+                    logger.info("compress_dict_diffs() {0},{1} APPEND {2}".format(diff_side, diff_word, line))
+                retval.append(line)
+                lines[diff_id_list] = len(retval) - 1
 
             # We can remove pretty easily... don't do anything...
             elif diff_side == "before" and diff_word == "remove":
-                all_output_dicts.append(dict_line)
-                all_dict_lines[diff_id_list] = len(all_output_dicts) - 1
+                if debug > 0:
+                    logger.info("compress_dict_diffs() {0},{1} APPEND {2}".format(diff_side, diff_word, line))
+                retval.append(line)
+                lines[diff_id_list] = len(retval) - 1
 
             elif diff_side == "after" and diff_word == "unchanged":
-                # FIXME - I should insert this somewhere in all_output_dicts...
-                if all_dict_lines.get(diff_id_list, None) is None:
-                    all_output_dicts.append(dict_line)
-                    all_dict_lines[diff_id_list] = len(all_output_dicts) - 1
+                # FIXME - I should insert this somewhere in retval...
+                if lines.get(diff_id_list, None) is None:
+                    if debug > 0:
+                        logger.info("compress_dict_diffs() {0},{1} APPEND {2}".format(diff_side, diff_word, line))
+                    retval.append(line)
+                    lines[diff_id_list] = len(retval) - 1
+                else:
+                    if debug > 0:
+                        logger.info("compress_dict_diffs() {0},{1} SKIP {2}".format(diff_side, diff_word, line))
 
             elif diff_side == "after" and diff_word == "add":
 
                 last_idx = -1
 
-                # Calculate values associated with dict_line
-                dict_line_id_len = len(dict_line["diff_id_list"])
-                dict_line_id_csv = ",".join(
-                    [str(ii) for ii in dict_line["diff_id_list"]]
+                # Calculate values associated with lines...
+                line_id_len = len(line["diff_id_list"])
+                line_id_csv = ",".join(
+                    [str(ii) for ii in line["diff_id_list"]]
                 )
 
-                # check all_output_dicts and find where we should "add" the
-                # dict_line...
-                for loop_idx, this_dict in enumerate(all_output_dicts):
+                # check retval and find where we should "add" the
+                # line...
+                for loop_idx, this_dict in enumerate(retval):
                     this_id_len = len(this_dict["diff_id_list"])
                     this_id_csv = ",".join(
                         [str(ii) for ii in this_dict["diff_id_list"]]
                     )
 
-                    # if this_dict (as a string csv) is a substring of dict_line's csv,
-                    # check whether this_dict should be dict_line's parent...
-                    if this_id_csv in dict_line_id_csv:
+                    # if this_dict (as a string csv) is a substring of line's csv,
+                    # check whether this_dict should be line's parent...
+                    if this_id_csv in line_id_csv:
 
                         last_idx = loop_idx
 
                         # If the length of this_dict["diff_id_list"] is one element
-                        # longer than dict_line["diff_id_list"], it's a pretty
-                        # safe assumption that this_dict is dict_line's parent...
-                        if (this_id_len + 1) == dict_line_id_len:
-                            all_output_dicts.insert(loop_idx + 1, dict_line)
-                            all_dict_lines[diff_id_list] = len(all_output_dicts) - 1
+                        # longer than line["diff_id_list"], it's a pretty
+                        # safe assumption that this_dict is line's parent...
+                        if (this_id_len + 1) == line_id_len:
+                            retval.insert(loop_idx + 1, line)
+                            lines[diff_id_list] = len(retval) - 1
                             break
                 else:
-                    # If there's no match above, assume we add dict_line as a
-                    # completely new element at the bottom of all_output_dicts
-                    all_output_dicts.append(dict_line)
-                    all_dict_lines[diff_id_list] = len(all_output_dicts) - 1
+                    # If there's no match above, assume we add line as a
+                    # completely new element at the bottom of retval
+                    if debug > 0:
+                        logger.info("compress_dict_diffs() {0},{1} APPEND {2}".format(diff_side, diff_word, line))
+                    retval.append(line)
+                    lines[diff_id_list] = len(retval) - 1
 
             else:
-                raise ValueError(dict_line)
+                raise ValueError(line)
 
-            if dict_line["diff_word"] != "remove":
+            if line["diff_word"] != "remove":
                 try:
-                    assert tuple(dict_line["diff_id_list"]) in all_dict_lines.keys()
+                    assert tuple(line["diff_id_list"]) in lines.keys()
                 except Exception:
-                    raise ValueError(dict_line)
+                    raise ValueError(line)
 
         # FIXME - undo this after I work out all bugs
-        for line in all_output_dicts:
+        for line in retval:
             del line["diff_id_list"]
 
-        return all_output_dicts
+        return retval
 
 
 class ConfigList(MutableSequence):
     """
     A custom list to hold :class:`~ccp_abc.BaseCfgLine` objects.  Most people will never need to use this class directly.
     """
+
+    @logger.catch(reraise=True)
     def __init__(
             self,
             initlist=None,
@@ -4236,7 +4272,7 @@ class ConfigList(MutableSequence):
         # syntax = kwargs.get('syntax', 'ios')
         # CiscoConfParse = kwargs.get('CiscoConfParse', None)
 
-        #super().__init__()
+        super().__init__()
 
         #######################################################################
         # Parse out CiscoConfParse and ccp_ref keywords...
@@ -4250,7 +4286,12 @@ class ConfigList(MutableSequence):
         # a multi-line string...
         #
         # This check will explicitly catch some problems like that...
-        if not isinstance(initlist, (list, tuple, MutableSequence)):
+
+        if isinstance(initlist, str):
+            # IMPORTANT This check MUST come first in ConfigList()
+            raise OSError
+
+        if not isinstance(initlist, Sequence):
             raise ValueError
 
 
@@ -4288,6 +4329,9 @@ class ConfigList(MutableSequence):
         assert is_valid_syntax is True
 
         # Support input configuration as either a list or a generator instance
+        #
+        # as of python 3.9, getattr() below is slightly faster than
+        #     isinstance(initlist, Sequence)
         if getattr(initlist, "__iter__", False):
             if self.syntax == "ios":
                 self._list = self._bootstrap_obj_init_ios(initlist)
@@ -4455,8 +4499,8 @@ class ConfigList(MutableSequence):
 
             ccp_ref = object.__getattribute__(self, 'ccp_ref')
             ccp_method = ccp_ref.__getattribute__(arg)
-            message = "{}() line {} called this method.  {} doesn't have an attribute named '{}'.  CiscoConfParse() is making this work with duct tape in __getattribute__().".format(
-                calling_function, caller.lineno, ccp_ref, ccp_method,
+            message = """{2} doesn't have an attribute named "{3}". {0}() line {1} called `__getattribute__('{4}')`. CiscoConfParse() is making this work with duct tape in __getattribute__().""".format(
+                calling_function, caller.lineno, ccp_ref, ccp_method, arg
             )
             logger.warning(message)
             return ccp_method
@@ -4518,18 +4562,18 @@ class ConfigList(MutableSequence):
 
         ## reparse all objects from their text attributes... this is *very* slow
         ## Ultimate goal: get rid of all reparsing from text...
-        tmp_list = [ii.text for ii in self._list]
+
         if self.syntax == 'ios':
-            self._list = self._bootstrap_obj_init_ios(tmp_list)
+            self._list = self._bootstrap_obj_init_ios(self.ioscfg)
 
         elif self.syntax == 'nxos':
-            self._list = self._bootstrap_obj_init_nxos(tmp_list)
+            self._list = self._bootstrap_obj_init_nxos(self.ioscfg)
 
         elif self.syntax == 'asa':
-            self._list = self._bootstrap_obj_init_asa(tmp_list)
+            self._list = self._bootstrap_obj_init_asa(self.ioscfg)
 
         elif self.syntax == 'junos':
-            self._list = self._bootstrap_obj_init_junos(tmp_list)
+            self._list = self._bootstrap_obj_init_junos(self.ioscfg)
 
         else:
             error = "no defined bootstrap method for syntax='%s'" % self.syntax
@@ -5016,17 +5060,8 @@ class ConfigList(MutableSequence):
                     finished = True
 
     # This method is on ConfigList()
-    def _bootstrap_obj_init_ios(self, text_list):
-        """
-        Accept a text list, and format into a list of proper
-        IOSCfgLine() objects or JunosCfgLine() objects.
-
-        This method returns a list of IOSCfgLine() objects.
-        """
-        if not isinstance(text_list, (list, tuple, MutableSequence)):
-            raise ValueError
-
-        # Append text lines as IOSCfgLine objects...
+    def _build_banner_re_ios(self):
+        """Return a banner regexp for IOS (and at this point, NXOS)."""
         banner_str = {
             "login",
             "motd",
@@ -5043,44 +5078,40 @@ class ConfigList(MutableSequence):
         )  # Github issue #76
         banner_re = re.compile("|".join(banner_all))
 
-        retval = list()
+        return banner_re
+
+
+    # This method is on ConfigList()
+    def _bootstrap_obj_init_ios(self, text_list):
+        """
+        Accept a text list, and format into a list of proper
+        IOSCfgLine() objects or JunosCfgLine() objects.
+
+        This method returns a list of IOSCfgLine() objects.
+        """
+        if not isinstance(text_list, Sequence):
+            raise ValueError
+
+        # Build the banner_re regexp... at this point ios
+        #    and nxos share the same method...
+        banner_re = self._build_banner_re_ios()
+
+        retval = []
         idx = 0
 
         max_indent = 0
-        macro_parent_idx_list = list()
-        parents = dict()
+        macro_parent_idx_list = []
+        parents = {}
         for txt in text_list:
             if not isinstance(txt, str):
                 raise ValueError
 
-
-            #
-            if not self.factory and self.syntax=="ios":
-                obj = IOSCfgLine(txt, self.comment_delimiter)
-
-            elif not self.factory and self.syntax=="junos":
-                obj = JunosCfgLine(txt, self.comment_delimiter)
-
-            elif self.syntax in ALL_VALID_SYNTAX:
-                obj = ConfigLineFactory(
-                    txt,
-                    self.comment_delimiter,
-                    syntax=self.syntax,
-                )
-
-            else:
-                err_txt = (
-                    "Cannot classify config list item '%s' "
-                    "into a proper configuration object line" % txt
-                )
-                logger.error(err_txt)
-                raise ValueError(err_txt)
-
+            obj = _build_cfgobj_from_text(txt, idx,
+                syntax=self.syntax,
+                comment_delimiter=self.comment_delimiter,
+                factory=self.factory)
             obj.confobj = self
-            obj.linenum = idx
-            indent = len(txt) - len(txt.lstrip())
-            obj.indent = indent
-
+            indent = obj.indent
             is_config_line = obj.is_config_line
 
             # list out macro parent line numbers...
@@ -5185,30 +5216,12 @@ class ConfigList(MutableSequence):
             if self.ignore_blank_lines and txt.strip() == "":
                 continue
 
-            if self.syntax == "asa" and self.factory:
-                obj = ConfigLineFactory(
-                    txt,
-                    self.comment_delimiter,
-                    syntax="asa",
-                )
-            elif self.syntax == "asa" and not self.factory:
-                obj = ASACfgLine(
-                    text=txt,
-                    comment_delimiter=self.comment_delimiter,
-                )
-            else:
-                err_txt = (
-                    "Cannot classify config list item '%s' "
-                    "into a proper configuration object line" % txt
-                )
-                logger.error(err_txt)
-                raise ValueError(err_txt)
-
+            obj = _build_cfgobj_from_text(txt, idx,
+                syntax=self.syntax,
+                comment_delimiter=self.comment_delimiter,
+                factory=self.factory)
             obj.confobj = self
-            obj.linenum = idx
-            indent = len(txt) - len(txt.lstrip())
-            obj.indent = indent
-
+            indent = obj.indent
             is_config_line = obj.is_config_line
 
             ## Parent cache:
@@ -5280,20 +5293,10 @@ class ConfigList(MutableSequence):
         if not isinstance(text_list, (list, tuple,)):
             raise ValueError
 
-        # Append text lines as NXOSCfgLine objects...
-        banner_str = {
-            "login",
-            "motd",
-            "incoming",
-            "exec",
-            "telnet",
-            "lcd",
-        }
-        banner_re = re.compile(
-            "|".join(
-                [r"^(set\s+)*banner\s+{}".format(ii) for ii in banner_str],
-            ),
-        )
+        # Build the banner_re regexp... at this point ios
+        #    and nxos share the same method...
+        banner_re = self._build_banner_re_ios()
+
         retval = list()
         idx = 0
 
@@ -5304,6 +5307,13 @@ class ConfigList(MutableSequence):
             if not isinstance(txt, str):
                 raise ValueError
 
+            obj = _build_cfgobj_from_text(txt, idx,
+                syntax=self.syntax,
+                comment_delimiter=self.comment_delimiter,
+                factory=self.factory)
+            obj.confobj = self
+            indent = obj.indent
+            is_config_line = obj.is_config_line
 
             #
             if not self.factory:
@@ -5405,23 +5415,6 @@ class ConfigList(MutableSequence):
         if not isinstance(text_list, (list, tuple,)):
             raise ValueError
 
-        # Append text lines as JunosCfgLine objects...
-        banner_str = {
-            "login",
-            "motd",
-            "incoming",
-            "exec",
-            "telnet",
-            "lcd",
-        }
-        banner_all = [
-            r"^(set\s+)*banner\s+{}".format(ii) for ii in banner_str
-        ]
-        banner_all.append(
-            "aaa authentication fail-message",
-        )  # Github issue #76
-        banner_re = re.compile("|".join(banner_all))
-
         retval = list()
         idx = 0
 
@@ -5435,30 +5428,12 @@ class ConfigList(MutableSequence):
 
             if self.ignore_blank_lines and txt.strip() == "":
                 continue
-            #
-            if not self.factory and self.syntax=="junos":
-                obj = JunosCfgLine(txt, self.comment_delimiter)
-
-            elif self.syntax in ALL_VALID_SYNTAX:
-                obj = ConfigLineFactory(
-                    txt,
-                    self.comment_delimiter,
-                    syntax=self.syntax,
-                )
-
-            else:
-                err_txt = (
-                    "Cannot classify config list item '%s' "
-                    "into a proper configuration object line" % txt
-                )
-                logger.error(err_txt)
-                raise ValueError(err_txt)
-
+            obj = _build_cfgobj_from_text(txt, idx,
+                syntax=self.syntax,
+                comment_delimiter=self.comment_delimiter,
+                factory=self.factory)
             obj.confobj = self
-            obj.linenum = idx
-            indent = len(txt) - len(txt.lstrip())
-            obj.indent = indent
-
+            indent = obj.indent
             is_config_line = obj.is_config_line
 
             # list out macro parent line numbers...
@@ -5524,10 +5499,6 @@ class ConfigList(MutableSequence):
         # Manually assign a parent on all closing braces
         self._list = assign_parent_to_closing_braces(input_list=self._list)
 
-        # Call _banner_mark_regex() to process banners in the returned obj
-        # list.
-        # Mark JunOS banner begin and end config line objects...
-        self._banner_mark_regex(banner_re)  # Junos banner
         # We need to use a different method for macros than banners because
         #   macros don't specify a delimiter on their parent line, but
         #   banners call out a delimiter.

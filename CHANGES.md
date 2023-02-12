@@ -4,6 +4,68 @@
 - Summary:
     - Insert something here
 
+## Version: 1.7.15
+
+- Released: 2023-02-10
+- Summary:
+    - Streamline `_bootstrap_from_text()` code.
+    - Extract common code into `_build_banner_re_ios()` (for nxos and ios)
+    - Extract common object init code from `CiscoConfParse()._bootstrap_obj_init_foo()` (where foo = asa, ios, nxos and junos) into `_build_cfgobj_from_text()`.
+    - Remove the unused `output_format` parameter from `HDiff()`
+    - Add `HDiff()` docstrings
+
+## Version: 1.7.14
+
+- Released: 2023-02-06
+- Summary:
+    - Allow `CiscoConfParse()` to parse an empty configuration command list i.e. `CiscoConfParse([])`; remove the `ValueError()` raised on parsing an empty config.
+    - Re-implement and simplify `CiscoConfParse().sync_diff()` with `HDiff()`.
+    - Rename variables in `HDiff().compress_dict_diffs()`.
+    - Rename dict_line to line and add the command indent rename dict_line to line and add the command indent rename dict_line to line and add the command indent in `CiscoConfParse().sync_diff()`
+    - Add 'parents' to `HDiff()` diff dicts and add parent line output in `sync_diff()`
+    - Expand `CiscoConfParse()` test coverage for reading files from disk
+
+## Version: 1.7.13
+
+- Released: 2023-01-31
+- Summary:
+    - Fix `CiscoConfParse().read_config_file()` recursive call in `read_config_file()`.
+    - Fix `CiscoConfParse().read_config_file()` missing `open()` in `read_config_file()`.
+    - Fix file-open test escapes associated with github issue #262.
+
+## Version: 1.7.12
+
+- Released: 2023-01-31
+- Summary:
+    - Fix `CiscoConfParse().read_config_file()` argument name test escape (ref github issue #262)
+
+## Version: 1.7.11
+
+- Released: 2023-01-28
+- Summary:
+    - Improve file `open()` error handling.  NOTE: `FileNotFoundError()` is now raised for invalid file paths.
+    - Improve edge case handling for Cisco IOS banner delimiters.
+    - Remove `_validate_ConfigObjs()` and improve logic in `CiscoConfParse().__init__()`.
+    - Revert back to using `read_config_file()` if the config is stored in a file.
+
+## Version: 1.7.9
+
+- Released: 2023-01-28
+- Summary:
+    - Fix unit tests to work with version 1.7.8+
+
+## Version: 1.7.8
+
+- Released: 2023-01-28
+- Summary:
+    - Streamline `CiscoConfParse().__init__()` logic and delegate `__init__()` tasks to dedicated methods.
+    - Validate that `CiscoConfParse().ConfigObjs` is None or instance of `collections.abc.Sequence()`
+    - Convert all checks for `collections.abc.Iterator` to `collections.abc.Sequence`; ref github issue #256
+    - Add more error conditions and explicit errors in ciscoconfparse/ciscoconfparse.py
+    - Implement `read_config_file()` logic
+    - Add more unit tests
+
+
 ## Version: 1.7.7
 
 - Released: 2023-01-27

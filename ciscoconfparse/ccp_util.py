@@ -1,6 +1,6 @@
 r""" ccp_util.py - Parse, Query, Build, and Modify IOS-style configurations
 
-     Copyright (C) 2021-2022 David Michael Pennington
+     Copyright (C) 2021-2023 David Michael Pennington
      Copyright (C) 2020-2021 David Michael Pennington at Cisco Systems
      Copyright (C) 2019-2020 David Michael Pennington at ThousandEyes
      Copyright (C) 2014-2019 David Michael Pennington at Samsung Data Services
@@ -301,7 +301,7 @@ def configure_loguru(
     if not isinstance(colorize, bool):
         raise ValueError
 
-    if not isinstance(debug, int) or (0 > debug):
+    if not isinstance(debug, int) or (debug < 0) or (5 < debug):
         raise ValueError
 
 
