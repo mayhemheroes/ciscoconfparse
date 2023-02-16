@@ -30,7 +30,7 @@ import sys
 import re
 import os
 
-from collections.abc import MutableSequence
+from collections.abc import MutableSequence, Sequence
 from ipaddress import IPv4Network, IPv6Network, IPv4Address, IPv6Address
 from ipaddress import collapse_addresses as ipaddr_collapse_addresses
 from ipaddress import AddressValueError
@@ -186,7 +186,7 @@ def ccp_logger_control(
     sink=sys.stderr,
     action="",
     handler_id=None,
-    allow_enqueue=True,
+    enqueue=True,
     # rotation="00:00",
     # retention="1 month",
     # compression="zip",
@@ -202,11 +202,11 @@ def ccp_logger_control(
     -------
     """
 
-    msg = "ccp_logger_control() was called with sink='{}', action='{}', handler_id='{}', allow_enqueue={}, level='{}', colorize={}, debug={}".format(
+    msg = "ccp_logger_control() was called with sink='{}', action='{}', handler_id='{}', enqueue={}, level='{}', colorize={}, debug={}".format(
         sink,
         action,
         handler_id,
-        allow_enqueue,
+        enqueue,
         # rotation,
         # retention,
         # compression,
@@ -250,7 +250,7 @@ def ccp_logger_control(
             diagnose=True,
             backtrace=True,
             # https://github.com/mpenning/ciscoconfparse/issues/215
-            enqueue=allow_enqueue,
+            enqueue=enqueue,
             serialize=False,
             catch=True,
             # rotation="00:00",
@@ -352,7 +352,7 @@ def as_text_list(object_list):
     >>>
 
     """
-    if not isinstance(object_list, (list, tuple,)):
+    if not isinstance(object_list, Sequence):
         raise ValueError
 
     for obj in object_list:
@@ -431,6 +431,31 @@ def log_function_call(function=None, *args, **kwargs):
     logger.info("Type 5 log_function_call: %s()" % (function.__qualname__))
     return logging_decorator
 
+
+def enforce_valid_types(var, var_types=None, error_str=None):
+    assert isinstance(var_types, tuple)
+    if not isinstance(var, var_types):
+        raise ValueError(error_str)
+
+
+@logger.catch(reraise=True)
+def fix_repeated_words(cmd="", word=""):
+    """Fix repeated words in the beginning of commands... Example 'no no logging 1.2.3.4' will be returned as 'logging 1.2.3.4' (both 'no' words are removed)."""
+    assert isinstance(cmd, str) and len(cmd) > 0
+    assert isinstance(word, str) and len(word) > 0
+    while True:
+        # look at the command and fix the repeated words in it...
+        rgx = r"^(?P<indent>\s*){0}\s+{0}\s+(?P<remaining_cmd>\S.+)$".format(
+            word.strip())
+        mm = re.search(rgx, cmd)
+        if mm is not None:
+            # We found a repeated word in the command...
+            indent = mm.group('indent')
+            remaining_cmd = mm.group('remaining_cmd')
+            cmd = "{0}{1}".format(indent, remaining_cmd)
+        else:
+            break
+    return cmd
 
 
 class __ccp_re__(object):
@@ -743,7 +768,7 @@ def collapse_addresses(network_list):
     addresses is an iterator of IPv4Network or IPv6Network objects. A
     TypeError is raised if addresses contains mixed version objects.
     """
-    if not isinstance(network_list, (list, tuple,)):
+    if not isinstance(network_list, Sequence):
         raise ValueError
 
     @logger.catch(reraise=True)
@@ -1152,7 +1177,7 @@ class IPv4Obj(object):
     def __add__(self, val):
         """Add an integer to IPv4Obj() and return an IPv4Obj()"""
         if not isinstance(val, int):
-            raise ValueError("Cannot add type: '{}' to {}".format(type(val)))
+            raise ValueError("Cannot add type: '{0}' to IPv4Obj()".format(type(val)))
 
         orig_prefixlen = self.prefixlen
         total = self.as_decimal + val
